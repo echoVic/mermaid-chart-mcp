@@ -235,11 +235,11 @@ export class SimpleMermaidMCPServer {
       global.window = window;
       global.document = window.document;
 
-      // 初始化Mermaid
+      // 初始化Mermaid，禁用 DOMPurify sanitizer
       mermaid.initialize({
         startOnLoad: false,
         theme: theme as any,
-        securityLevel: 'loose',
+        securityLevel: 'antiscript', // 使用 antiscript 而不是 loose，禁用 DOMPurify
         fontSize: 16,
         fontFamily: 'Arial, sans-serif'
       });
@@ -280,10 +280,10 @@ export class SimpleMermaidMCPServer {
     try {
       global.window = window;
       global.document = window.document;
-
+      
       mermaid.initialize({
         startOnLoad: false,
-        securityLevel: 'loose'
+        securityLevel: 'antiscript' // 禁用 DOMPurify
       });
 
       await mermaid.parse(mermaidCode);
