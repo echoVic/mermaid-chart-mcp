@@ -25,7 +25,6 @@
     "noImplicitOverride": true,
     "moduleResolution": "node",
     "allowSyntheticDefaultImports": true,
-    "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,

@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 /**
  * 简化版Mermaid Chart MCP服务器
  * 核心功能：接收Mermaid代码 → 渲染SVG → 创建临时文件
@@ -23,6 +21,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { JSDOM } from 'jsdom';
 import mermaid from 'mermaid';
+import { validateInput, sanitizeFileName } from './utils.js';
 
 export class SimpleMermaidMCPServer {
   private server: Server;
@@ -56,12 +55,14 @@ export class SimpleMermaidMCPServer {
               properties: {
                 mermaidCode: {
                   type: 'string',
-                  description: 'Mermaid图表代码（由Cursor大模型生成）'
+                  description: 'Mermaid图表代码（由Cursor大模型生成）',
+                  maxLength: 50000
                 },
                 title: {
                   type: 'string',
                   description: '图表标题（可选）',
-                  default: 'Mermaid图表'
+                  default: 'Mermaid图表',
+                  maxLength: 100
                 },
                 theme: {
                   type: 'string',
@@ -86,7 +87,8 @@ export class SimpleMermaidMCPServer {
               properties: {
                 mermaidCode: {
                   type: 'string',
-                  description: 'Mermaid图表代码'
+                  description: 'Mermaid图表代码',
+                  maxLength: 50000
                 }
               },
               required: ['mermaidCode']
@@ -134,24 +136,15 @@ export class SimpleMermaidMCPServer {
   }) {
     const { mermaidCode, title = 'Mermaid图表', theme = 'default', createTempFile = true } = params;
 
+    // 输入校验
+    const validationError = validateInput({ mermaidCode, title, theme });
+    if (validationError) {
+      throw new Error(`输入校验失败: ${validationError}`);
+    }
+
     try {
-      // 创建虚拟DOM环境
-      const dom = new JSDOM('<!DOCTYPE html><html><body><div id="mermaid-container"></div></body></html>');
-      const window = dom.window as any;
-      global.window = window;
-      global.document = window.document;
-
-      // 初始化Mermaid
-      mermaid.initialize({
-        startOnLoad: false,
-        theme: theme as any,
-        securityLevel: 'loose',
-        fontSize: 16,
-        fontFamily: 'Arial, sans-serif'
-      });
-
-      // 渲染SVG
-      const { svg } = await mermaid.render('mermaid-diagram', mermaidCode);
+      // 渲染SVG，使用隔离的JSDOM实例
+      const svg = await this.renderMermaidInIsolatedContext(mermaidCode, theme);
       
       // 添加标题到SVG
       const svgWithTitle = this.addTitleToSVG(svg, title);
@@ -193,21 +186,15 @@ export class SimpleMermaidMCPServer {
   private async handleValidateMermaidSyntax(params: { mermaidCode: string }) {
     const { mermaidCode } = params;
 
+    // 输入校验
+    const validationError = validateInput({ mermaidCode });
+    if (validationError) {
+      throw new Error(`输入校验失败: ${validationError}`);
+    }
+
     try {
-      // 创建虚拟DOM环境
-      const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>');
-      const window = dom.window as any;
-      global.window = window;
-      global.document = window.document;
-
-      // 初始化Mermaid
-      mermaid.initialize({
-        startOnLoad: false,
-        securityLevel: 'loose'
-      });
-
-      // 尝试解析
-      await mermaid.parse(mermaidCode);
+      // 在隔离环境中验证语法
+      await this.validateMermaidInIsolatedContext(mermaidCode);
 
       return {
         content: [
@@ -232,30 +219,150 @@ export class SimpleMermaidMCPServer {
   }
 
   /**
-   * 为SVG添加标题
+   * 在隔离的上下文中渲染Mermaid
+   * 解决全局污染问题
    */
-  private addTitleToSVG(svg: string, title: string): string {
-    // 在SVG中添加标题元素
-    const titleElement = `<title>${title}</title>`;
-    return svg.replace('<svg', `<svg${titleElement ? '\n  ' + titleElement : ''}`);
+  private async renderMermaidInIsolatedContext(mermaidCode: string, theme: string): Promise<string> {
+    // 创建独立的JSDOM实例
+    const dom = new JSDOM('<!DOCTYPE html><html><body><div id="mermaid-container"></div></body></html>');
+    const window = dom.window as any;
+    
+    // 创建临时的全局变量覆盖，而不是直接修改global
+    const originalWindow = global.window;
+    const originalDocument = global.document;
+    
+    try {
+      // 临时设置全局变量
+      global.window = window;
+      global.document = window.document;
+
+      // 初始化Mermaid
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: theme as any,
+        securityLevel: 'loose',
+        fontSize: 16,
+        fontFamily: 'Arial, sans-serif'
+      });
+
+      // 渲染SVG
+      const { svg } = await mermaid.render('mermaid-diagram', mermaidCode);
+      return svg;
+      
+    } finally {
+      // 恢复原始的全局变量
+      if (originalWindow !== undefined) {
+        global.window = originalWindow;
+      } else {
+        delete (global as any).window;
+      }
+      
+      if (originalDocument !== undefined) {
+        global.document = originalDocument;
+      } else {
+        delete (global as any).document;
+      }
+      
+      // 清理DOM
+      dom.window.close();
+    }
   }
 
   /**
-   * 检测图表类型
+   * 在隔离的上下文中验证Mermaid语法
+   */
+  private async validateMermaidInIsolatedContext(mermaidCode: string): Promise<void> {
+    const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>');
+    const window = dom.window as any;
+    
+    const originalWindow = global.window;
+    const originalDocument = global.document;
+    
+    try {
+      global.window = window;
+      global.document = window.document;
+
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: 'loose'
+      });
+
+      await mermaid.parse(mermaidCode);
+      
+    } finally {
+      if (originalWindow !== undefined) {
+        global.window = originalWindow;
+      } else {
+        delete (global as any).window;
+      }
+      
+      if (originalDocument !== undefined) {
+        global.document = originalDocument;
+      } else {
+        delete (global as any).document;
+      }
+      
+      dom.window.close();
+    }
+  }
+
+  /**
+   * 为SVG添加标题（使用DOM解析，更稳健）
+   */
+  private addTitleToSVG(svg: string, title: string): string {
+    try {
+      // 使用DOM解析器插入title元素
+      const dom = new JSDOM(`<!DOCTYPE html><html><body>${svg}</body></html>`);
+      const svgElement = dom.window.document.querySelector('svg');
+      
+      if (svgElement) {
+        // 创建title元素
+        const titleElement = dom.window.document.createElement('title');
+        titleElement.textContent = title;
+        
+        // 将title作为第一个子元素插入
+        svgElement.insertBefore(titleElement, svgElement.firstChild);
+        
+        return svgElement.outerHTML;
+      }
+      
+      // 回退到简单字符串替换
+      return svg.replace('<svg', `<svg>\n  <title>${title}</title>`);
+      
+    } catch (error) {
+      // 回退到简单字符串替换
+      const titleElement = `<title>${title}</title>`;
+      return svg.replace('<svg', `<svg>\n  ${titleElement}`);
+    }
+  }
+
+  /**
+   * 检测图表类型（更精细的判断）
    */
   private detectDiagramType(mermaidCode: string): string {
     const code = mermaidCode.toLowerCase().trim();
     
-    if (code.includes('graph') || code.includes('flowchart')) return '流程图';
-    if (code.includes('sequencediagram') || code.includes('sequence')) return '序列图';
-    if (code.includes('classdiagram') || code.includes('class')) return '类图';
-    if (code.includes('gantt')) return '甘特图';
-    if (code.includes('pie')) return '饼图';
-    if (code.includes('erdiagram') || code.includes('er')) return 'ER图';
-    if (code.includes('journey')) return '用户旅程图';
-    if (code.includes('gitgraph')) return 'Git图';
-    if (code.includes('mindmap')) return '思维导图';
-    if (code.includes('timeline')) return '时间线';
+    // 使用更精确的正则匹配
+    const patterns = [
+      { pattern: /^(graph|flowchart)\s+(TD|TB|BT|RL|LR)/, type: '流程图' },
+      { pattern: /^sequencediagram/m, type: '序列图' },
+      { pattern: /^classDiagram/m, type: '类图' },
+      { pattern: /^gantt/m, type: '甘特图' },
+      { pattern: /^pie(\s+title)?/m, type: '饼图' },
+      { pattern: /^erdiagram/m, type: 'ER图' },
+      { pattern: /^journey/m, type: '用户旅程图' },
+      { pattern: /^gitgraph/m, type: 'Git图' },
+      { pattern: /^mindmap/m, type: '思维导图' },
+      { pattern: /^timeline/m, type: '时间线' },
+      { pattern: /^requirementdiagram/m, type: '需求图' },
+      { pattern: /^statediagram(-v2)?/m, type: '状态图' }
+    ];
+
+    for (const { pattern, type } of patterns) {
+      if (pattern.test(code)) {
+        return type;
+      }
+    }
     
     return '未知类型';
   }
@@ -265,7 +372,8 @@ export class SimpleMermaidMCPServer {
    */
   private async createTempSVGFile(svg: string, title: string): Promise<string> {
     const tempDir = os.tmpdir();
-    const fileName = `mermaid_${title.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}.svg`;
+    const sanitizedTitle = sanitizeFileName(title);
+    const fileName = `mermaid_${sanitizedTitle}_${Date.now()}.svg`;
     const filePath = path.join(tempDir, fileName);
     
     await fs.writeFile(filePath, svg, 'utf8');
