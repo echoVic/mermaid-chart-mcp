@@ -1,6 +1,6 @@
 # Mermaid Chart MCP Server
 
-一个专注于Mermaid图表渲染的简化MCP服务器，支持将Mermaid代码渲染为SVG图表。
+一个专注于Mermaid图表渲染的MCP服务器，支持将Mermaid代码渲染为SVG图表。
 
 ## ✨ 特性
 
@@ -58,6 +58,24 @@ pnpm start                  # stdio模式
 pnpm run start:sse          # SSE模式
 pnpm run start:sse:port     # SSE模式（端口3001）
 ```
+
+## 🔍 调试和测试
+
+推荐使用官方的 [MCP Inspector](https://github.com/modelcontextprotocol/inspector) 进行调试和测试：
+
+```bash
+# 使用 MCP Inspector 调试服务器
+npx @modelcontextprotocol/inspector node dist/server/index.js
+
+# 或者在开发模式下
+npx @modelcontextprotocol/inspector node --loader ts-node/esm src/server/index.ts
+```
+
+MCP Inspector 提供了强大的可视化界面，支持：
+- 🎨 交互式工具测试
+- 📊 实时请求/响应监控
+- 🔧 参数配置和验证
+- 📋 完整的API探索
 
 ## 🛠️ 可用工具
 

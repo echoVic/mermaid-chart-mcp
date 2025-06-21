@@ -82,7 +82,7 @@ export class SSETransport {
       res.json({
         name: 'Mermaid Chart MCP Server',
         version: '1.0.0',
-        description: '一个专注于Mermaid图表渲染的简化MCP服务器',
+        description: '一个专注于Mermaid图表渲染的MCP服务器',
         endpoints: {
           sse: '/sse',
           health: '/health',
@@ -366,7 +366,7 @@ export class SSETransport {
     <div class="container">
         <div class="header">
             <h1>🧜‍♀️ Mermaid Chart MCP Server</h1>
-            <p>专业的Mermaid图表渲染服务器 - SSE模式运行在端口 ${port}</p>
+            <p>Mermaid图表渲染服务器 - SSE模式运行在端口 ${port}</p>
         </div>
         
         <div class="status-grid">

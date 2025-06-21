@@ -1,12 +1,11 @@
 /**
- * 简化版Mermaid Chart MCP服务器
+ * Mermaid Chart MCP服务器
  * 核心功能：接收Mermaid代码 → 渲染SVG → 创建临时文件
  * 
  * 预期工作流程：
- * 1. 用户在Cursor中圈选代码
- * 2. Cursor大模型生成Mermaid代码
- * 3. MCP接收Mermaid代码并渲染成SVG
- * 4. 返回SVG文件路径或内容
+ * 1. AI助手或应用生成Mermaid代码
+ * 2. MCP接收Mermaid代码并渲染成SVG
+ * 3. 返回SVG文件路径或内容
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -29,7 +28,7 @@ export class SimpleMermaidMCPServer {
   constructor() {
     this.server = new Server(
       {
-        name: 'simple-mermaid-chart-mcp',
+        name: 'mermaid-chart-mcp',
         version: '1.0.0'
       },
       {
@@ -394,7 +393,7 @@ export class SimpleMermaidMCPServer {
   async run(): Promise<void> {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error('🚀 简化版Mermaid Chart MCP服务器已启动');
+    console.error('🚀 Mermaid Chart MCP服务器已启动');
   }
 }
 

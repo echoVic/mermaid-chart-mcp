@@ -1,6 +1,6 @@
 # Mermaid Chart MCP Server 改进总结
 
-本文档总结了根据代码工程建议所做的全面改进。
+本文档总结了根据代码工程建议所做的全面改进。推荐使用 [MCP Inspector](https://github.com/modelcontextprotocol/inspector) 进行调试和测试。
 
 ## 🏗️ 架构改进
 
