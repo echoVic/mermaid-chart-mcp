@@ -22,6 +22,7 @@ export default defineConfig({
     'express',
     'jsdom',
     'mermaid',
+    'puppeteer',
     'zod'
   ],
   banner: {

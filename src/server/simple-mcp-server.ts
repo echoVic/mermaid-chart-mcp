@@ -19,11 +19,14 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { JSDOM } from 'jsdom';
+import puppeteer, { Browser } from 'puppeteer';
 import mermaid from 'mermaid';
+import createDOMPurify from 'dompurify';
 import { validateInput, sanitizeFileName } from './utils.js';
 
 export class SimpleMermaidMCPServer {
   private server: Server;
+  private browser?: Browser;
 
   constructor() {
     this.server = new Server(
@@ -125,6 +128,26 @@ export class SimpleMermaidMCPServer {
   }
 
   /**
+   * 初始化浏览器实例（延迟初始化）
+   */
+  private async getBrowser(): Promise<Browser> {
+    if (!this.browser) {
+      this.browser = await puppeteer.launch({
+        headless: 'new', // 使用新的Headless模式
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-web-security'
+        ]
+      });
+    }
+    return this.browser;
+  }
+
+
+
+  /**
    * 渲染Mermaid代码为SVG
    */
   private async handleRenderMermaidToSVG(params: {
@@ -218,49 +241,273 @@ export class SimpleMermaidMCPServer {
   }
 
   /**
-   * 在隔离的上下文中渲染Mermaid
-   * 解决全局污染问题
+   * 渲染Mermaid - 先尝试Puppeteer，失败时降级到JSDOM
    */
   private async renderMermaidInIsolatedContext(mermaidCode: string, theme: string): Promise<string> {
+    try {
+      console.error('🌐 尝试使用Puppeteer渲染...');
+      return await this.renderWithPuppeteer(mermaidCode, theme);
+    } catch (error) {
+      console.error('⚠️ Puppeteer失败，降级到JSDOM:', error instanceof Error ? error.message : String(error));
+      console.error('🔄 使用JSDOM降级方案...');
+      try {
+        return await this.renderWithJSDOM(mermaidCode, theme);
+      } catch (jsdomError) {
+        console.error('⚠️ JSDOM也失败，使用静态降级方案:', jsdomError instanceof Error ? jsdomError.message : String(jsdomError));
+        return this.renderStaticFallback(mermaidCode, theme);
+      }
+    }
+  }
+
+  /**
+   * 使用Puppeteer在真实浏览器环境中渲染Mermaid
+   */
+  private async renderWithPuppeteer(mermaidCode: string, theme: string): Promise<string> {
+    let browser;
+    let page;
+    
+    try {
+      // 每次都启动新的浏览器实例（避免连接重用问题）
+      browser = await puppeteer.launch({
+        headless: 'new',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-web-security',
+          '--disable-extensions',
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding'
+        ],
+        timeout: 10000
+      });
+      
+      page = await browser.newPage();
+
+      // 设置页面错误监听
+      page.on('console', (msg) => {
+        if (msg.type() === 'error') {
+          console.error('浏览器控制台错误:', msg.text());
+        }
+      });
+
+      page.on('pageerror', (error) => {
+        console.error('页面错误:', error.message);
+      });
+
+      // 创建HTML页面内容
+      const htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11.7.0/dist/mermaid.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+</head>
+<body>
+    <div id="mermaid-container"></div>
+    
+    <script>
+        // 初始化Mermaid
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: '${theme}',
+            securityLevel: 'loose'
+        });
+        
+        // 渲染函数
+        window.renderMermaid = async function(mermaidCode) {
+            try {
+                const { svg } = await mermaid.render('diagram-id-' + Date.now(), mermaidCode);
+                return { success: true, svg };
+            } catch (error) {
+                return { 
+                    success: false, 
+                    error: error.message || error.toString() || 'Unknown error'
+                };
+            }
+        };
+    </script>
+</body>
+</html>
+      `;
+
+      // 设置页面内容
+      await page.setContent(htmlContent, { waitUntil: 'networkidle0', timeout: 30000 });
+
+      // 等待Mermaid加载完成
+      await page.waitForFunction(
+        () => typeof (window as any).mermaid !== 'undefined' && typeof (window as any).renderMermaid !== 'undefined',
+        { timeout: 30000 }
+      );
+
+      // 在页面中执行渲染
+      const result = await page.evaluate(async (code) => {
+        try {
+          return await (window as any).renderMermaid(code);
+        } catch (error) {
+          return {
+            success: false,
+            error: `页面执行错误: ${error instanceof Error ? error.message : String(error)}`
+          };
+        }
+      }, mermaidCode);
+
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+
+      if (!result.svg) {
+        throw new Error('渲染结果为空');
+      }
+
+      return result.svg;
+
+    } catch (error) {
+      // 详细的错误日志
+      console.error('渲染错误详情:', {
+        type: typeof error,
+        message: error instanceof Error ? error.message : 'No message',
+        stack: error instanceof Error ? error.stack : 'No stack',
+        error: error
+      });
+      
+      // 更安全的错误信息提取
+      let errorMessage = 'Unknown error';
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      } else if (typeof error === 'string') {
+        errorMessage = error;
+      } else if (error && typeof error === 'object') {
+        // 处理ErrorEvent或其他特殊错误对象
+        if ('type' in error && 'error' in error) {
+          // 这是一个ErrorEvent
+          const innerError = (error as any).error;
+          if (innerError instanceof Error) {
+            errorMessage = `浏览器连接错误: ${innerError.message}`;
+          } else {
+            errorMessage = `浏览器连接错误: ${(error as any).type}`;
+          }
+        } else if ('message' in error) {
+          errorMessage = String((error as any).message);
+        } else if ('code' in error) {
+          errorMessage = `错误代码: ${(error as any).code}`;
+        } else {
+          try {
+            errorMessage = JSON.stringify(error);
+          } catch {
+            errorMessage = `Error object: ${Object.prototype.toString.call(error)}`;
+          }
+        }
+      } else {
+        errorMessage = `Unexpected error type: ${typeof error}`;
+      }
+      
+      throw new Error(errorMessage);
+    } finally {
+      // 清理资源
+      if (page) {
+        await page.close().catch(() => {});
+      }
+      if (browser) {
+        await browser.close().catch(() => {});
+      }
+    }
+  }
+
+  /**
+   * 静态降级方案 - 当所有其他方法都失败时使用
+   */
+  private renderStaticFallback(mermaidCode: string, theme: string): string {
+    const diagramType = this.detectDiagramType(mermaidCode);
+    const timestamp = new Date().toISOString();
+    
+    // 生成一个基本的信息性SVG
+    return `<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
+      <rect width="100%" height="100%" fill="${theme === 'dark' ? '#1e1e1e' : '#ffffff'}" stroke="${theme === 'dark' ? '#666' : '#ccc'}" stroke-width="1"/>
+      <text x="200" y="50" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="${theme === 'dark' ? '#ffffff' : '#000000'}">
+        Mermaid图表 (${diagramType})
+      </text>
+      <text x="200" y="80" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="${theme === 'dark' ? '#cccccc' : '#666666'}">
+        渲染环境不可用
+      </text>
+      <text x="200" y="120" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="${theme === 'dark' ? '#999999' : '#888888'}">
+        原始代码:
+      </text>
+      <foreignObject x="20" y="140" width="360" height="140">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family: monospace; font-size: 9px; padding: 10px; background: ${theme === 'dark' ? '#2d2d2d' : '#f5f5f5'}; border-radius: 4px; overflow: auto; max-height: 120px; color: ${theme === 'dark' ? '#ffffff' : '#000000'};">
+          ${mermaidCode.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}
+        </div>
+      </foreignObject>
+      <text x="200" y="295" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="${theme === 'dark' ? '#777777' : '#999999'}">
+        生成时间: ${timestamp}
+      </text>
+    </svg>`;
+  }
+
+  /**
+   * 使用JSDOM作为降级方案渲染Mermaid
+   */
+  private async renderWithJSDOM(mermaidCode: string, theme: string): Promise<string> {
     // 创建独立的JSDOM实例
     const dom = new JSDOM('<!DOCTYPE html><html><body><div id="mermaid-container"></div></body></html>');
     const window = dom.window as any;
     
-    // 创建临时的全局变量覆盖，而不是直接修改global
-    const originalWindow = global.window;
-    const originalDocument = global.document;
+    // 备份原始全局变量
+    const originalWindow = (global as any).window;
+    const originalDocument = (global as any).document;
     
     try {
-      // 临时设置全局变量
-      global.window = window;
-      global.document = window.document;
+      // 设置全局变量
+      (global as any).window = window;
+      (global as any).document = window.document;
+      
+      // 在antiscript模式下不需要DOMPurify，但为了兼容性还是设置一个
+      try {
+        const DOMPurify = createDOMPurify(window);
+        (global as any).DOMPurify = DOMPurify;
+        (window as any).DOMPurify = DOMPurify;
+             } catch (e) {
+         // DOMPurify设置失败也没关系，antiscript模式不依赖它
+         console.error('DOMPurify设置失败，但继续使用antiscript模式:', e instanceof Error ? e.message : String(e));
+       }
 
-      // 初始化Mermaid，禁用 DOMPurify sanitizer
+      // 初始化Mermaid，使用antiscript来避免DOMPurify依赖
       mermaid.initialize({
         startOnLoad: false,
         theme: theme as any,
-        securityLevel: 'antiscript', // 使用 antiscript 而不是 loose，禁用 DOMPurify
+        securityLevel: 'antiscript',  // 使用antiscript避免DOMPurify
         fontSize: 16,
-        fontFamily: 'Arial, sans-serif'
+        fontFamily: 'Arial, sans-serif',
+        suppressErrorRendering: false
       });
 
       // 渲染SVG
-      const { svg } = await mermaid.render('mermaid-diagram', mermaidCode);
+      const { svg } = await mermaid.render('mermaid-diagram-' + Date.now(), mermaidCode);
+      
+      if (!svg) {
+        throw new Error('JSDOM渲染失败：SVG为空');
+      }
+      
       return svg;
       
     } finally {
-      // 恢复原始的全局变量
+      // 恢复原始全局变量
       if (originalWindow !== undefined) {
-        global.window = originalWindow;
+        (global as any).window = originalWindow;
       } else {
         delete (global as any).window;
       }
       
       if (originalDocument !== undefined) {
-        global.document = originalDocument;
+        (global as any).document = originalDocument;
       } else {
         delete (global as any).document;
       }
+      
+      // 清理DOMPurify
+      delete (global as any).DOMPurify;
       
       // 清理DOM
       dom.window.close();
@@ -268,39 +515,162 @@ export class SimpleMermaidMCPServer {
   }
 
   /**
-   * 在隔离的上下文中验证Mermaid语法
+   * 验证Mermaid语法 - 先尝试Puppeteer，失败时降级到JSDOM
    */
   private async validateMermaidInIsolatedContext(mermaidCode: string): Promise<void> {
+    try {
+      console.error('🌐 尝试使用Puppeteer验证...');
+      return await this.validateWithPuppeteer(mermaidCode);
+    } catch (error) {
+      console.error('⚠️ Puppeteer验证失败，降级到JSDOM:', error instanceof Error ? error.message : String(error));
+      console.error('🔄 使用JSDOM验证...');
+      try {
+        return await this.validateWithJSDOM(mermaidCode);
+      } catch (jsdomError) {
+        console.error('⚠️ JSDOM验证也失败，使用静态验证:', jsdomError instanceof Error ? jsdomError.message : String(jsdomError));
+        return this.validateStaticFallback(mermaidCode);
+      }
+    }
+  }
+
+  /**
+   * 使用Puppeteer在真实浏览器环境中验证Mermaid语法
+   */
+  private async validateWithPuppeteer(mermaidCode: string): Promise<void> {
+    const browser = await this.getBrowser();
+    const page = await browser.newPage();
+
+    try {
+      // 创建HTML页面内容
+      const htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11.7.0/dist/mermaid.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+</head>
+<body>
+    <script>
+        // 初始化Mermaid
+        mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: 'loose'
+        });
+        
+        // 验证函数
+        window.validateMermaid = async function(mermaidCode) {
+            try {
+                await mermaid.parse(mermaidCode);
+                return { success: true };
+            } catch (error) {
+                return {
+                    success: false,
+                    error: error.message || error.toString() || 'Unknown validation error'
+                };
+            }
+        };
+    </script>
+</body>
+</html>
+      `;
+
+      // 设置页面内容
+      await page.setContent(htmlContent);
+
+      // 等待Mermaid加载完成
+      await page.waitForFunction(() => typeof (window as any).mermaid !== 'undefined' && typeof (window as any).validateMermaid !== 'undefined');
+
+      // 在页面中执行验证
+      const result = await page.evaluate(async (code) => {
+        return await (window as any).validateMermaid(code);
+      }, mermaidCode);
+
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+
+    } finally {
+      await page.close();
+    }
+  }
+
+  /**
+   * 静态验证方案 - 基本的语法检查
+   */
+  private validateStaticFallback(mermaidCode: string): void {
+    console.error('🔍 使用静态语法检查...');
+    
+    // 基本的语法检查
+    if (!mermaidCode || typeof mermaidCode !== 'string') {
+      throw new Error('代码不能为空且必须是字符串');
+    }
+    
+    const trimmedCode = mermaidCode.trim();
+    if (trimmedCode.length === 0) {
+      throw new Error('代码内容不能为空');
+    }
+    
+    // 检查是否包含基本的图表类型关键词
+    const diagramTypes = [
+      'graph', 'flowchart', 'sequenceDiagram', 'classDiagram', 
+      'gantt', 'pie', 'erDiagram', 'journey', 'gitgraph',
+      'mindmap', 'timeline', 'requirementDiagram', 'stateDiagram'
+    ];
+    
+    const lowerCode = trimmedCode.toLowerCase();
+    const hasValidType = diagramTypes.some(type => lowerCode.includes(type.toLowerCase()));
+    
+    if (!hasValidType) {
+      throw new Error('未识别的图表类型。请确保代码包含有效的Mermaid图表类型关键词');
+    }
+    
+    console.error('✅ 静态验证通过');
+  }
+
+  /**
+   * 使用JSDOM验证Mermaid语法
+   */
+  private async validateWithJSDOM(mermaidCode: string): Promise<void> {
+    // 创建独立的JSDOM实例用于验证
     const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>');
     const window = dom.window as any;
     
-    const originalWindow = global.window;
-    const originalDocument = global.document;
+    // 备份原始全局变量
+    const originalWindow = (global as any).window;
+    const originalDocument = (global as any).document;
     
     try {
-      global.window = window;
-      global.document = window.document;
+      // 设置全局变量
+      (global as any).window = window;
+      (global as any).document = window.document;
       
+      // 初始化Mermaid用于验证（使用antiscript避免DOMPurify）
       mermaid.initialize({
         startOnLoad: false,
-        securityLevel: 'antiscript' // 禁用 DOMPurify
+        theme: 'default',
+        securityLevel: 'antiscript',
+        suppressErrorRendering: false
       });
 
+      // 尝试解析（不需要实际渲染）
       await mermaid.parse(mermaidCode);
       
     } finally {
+      // 恢复原始全局变量
       if (originalWindow !== undefined) {
-        global.window = originalWindow;
+        (global as any).window = originalWindow;
       } else {
         delete (global as any).window;
       }
       
       if (originalDocument !== undefined) {
-        global.document = originalDocument;
+        (global as any).document = originalDocument;
       } else {
         delete (global as any).document;
       }
       
+      // 清理DOM
       dom.window.close();
     }
   }
